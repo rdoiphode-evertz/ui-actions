@@ -4,13 +4,18 @@
       "pattern": "src/components/browse/**",
       "tests": [
         {
-          "id": "YOUR_PLAN_ID_1",
-          "name": "Browse Player Tests",
+          "id": "mock-plan-001",
+          "name": "Browse Player - Back Navigation",
           "impact": "direct"
         },
         {
-          "id": "YOUR_PLAN_ID_2",
-          "name": "Navigation Regression",
+          "id": "mock-plan-002",
+          "name": "Browse Player - Forward Navigation",
+          "impact": "direct"
+        },
+        {
+          "id": "mock-plan-003",
+          "name": "Browse Player - Playback Controls",
           "impact": "indirect"
         }
       ]
@@ -19,8 +24,13 @@
       "pattern": "src/components/auth/**",
       "tests": [
         {
-          "id": "YOUR_PLAN_ID_3",
-          "name": "Auth Flow Tests",
+          "id": "mock-plan-004",
+          "name": "Auth - Login Flow",
+          "impact": "direct"
+        },
+        {
+          "id": "mock-plan-005",
+          "name": "Auth - Session Expiry",
           "impact": "direct"
         }
       ]
@@ -29,7 +39,7 @@
       "pattern": "src/components/**",
       "tests": [
         {
-          "id": "YOUR_PLAN_ID_4",
+          "id": "mock-plan-006",
           "name": "Full UI Regression",
           "impact": "indirect"
         }
@@ -39,14 +49,14 @@
       "pattern": "src/services/**",
       "tests": [
         {
-          "id": "YOUR_PLAN_ID_3",
-          "name": "Auth Flow Tests",
+          "id": "mock-plan-006",
+          "name": "Full UI Regression",
           "impact": "indirect"
         },
         {
-          "id": "YOUR_PLAN_ID_4",
-          "name": "Full UI Regression",
-          "impact": "indirect"
+          "id": "mock-plan-007",
+          "name": "API Integration Tests",
+          "impact": "direct"
         }
       ]
     }

@@ -1,8 +1,6 @@
 name: mabl Impact Check
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       staging_url:
@@ -11,6 +9,9 @@ on:
       pr_number:
         description: 'PR number to post results to'
         required: true
+      changed_files:
+        description: 'Comma-separated list of changed files (e.g. src/components/browse/player.ts)'
+        required: false
 
 jobs:
   mabl-impact:
@@ -23,13 +24,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Get changed files
-        id: changed-files
-        if: github.event_name == 'pull_request'
-        uses: tj-actions/changed-files@v44
-        with:
-          separator: ','
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -40,13 +34,10 @@ jobs:
           MABL_API_KEY: ${{ secrets.MABL_API_KEY }}
           MABL_WORKSPACE_ID: ${{ secrets.MABL_WORKSPACE_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event_name == 'pull_request' && github.event.pull_request.number || inputs.pr_number }}
+          PR_NUMBER: ${{ inputs.pr_number }}
           COMMIT_SHA: ${{ github.sha }}
           REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
-          # On pull_request: auto-constructed from commit SHA (adjust pattern to match your staging URL)
-          # On workflow_dispatch: use the manually provided URL
-          STAGING_URL: ${{ github.event_name == 'pull_request' && format('{0}.eio-ops.staging.evertz.tools', github.sha) || inputs.staging_url }}
-          # Space-separated list of changed files (empty on workflow_dispatch)
-          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+          STAGING_URL: ${{ inputs.staging_url }}
+          CHANGED_FILES: ${{ inputs.changed_files }}
         run: node .github/scripts/mabl-impact.js

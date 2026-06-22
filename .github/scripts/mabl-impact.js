@@ -146,7 +146,8 @@ function statusEmoji(status) {
     scheduled:  '🔄',
     cancelled:  '⚫',
     skipped:    '⏭️',
-    pending:    '🔄',
+    pending:     '🔄',
+    'no-api-key': '⚠️',
   };
   return map[status] || '❓';
 }
@@ -259,10 +260,13 @@ async function pollUntilComplete(tests, owner, repo, shortSha) {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
-  if (!MABL_API_KEY)      throw new Error('MABL_API_KEY secret is not set');
-  if (!MABL_WORKSPACE_ID) throw new Error('MABL_WORKSPACE_ID secret is not set');
-  if (!PR_NUMBER)         throw new Error('PR_NUMBER is not set');
-  if (!STAGING_URL)       throw new Error('STAGING_URL is not set');
+  if (!PR_NUMBER)   throw new Error('PR_NUMBER is not set');
+  if (!STAGING_URL) throw new Error('STAGING_URL is not set');
+
+  const apiKeyMissing = !MABL_API_KEY || !MABL_WORKSPACE_ID;
+  if (apiKeyMissing) {
+    console.warn('MABL_API_KEY or MABL_WORKSPACE_ID not set — running in preview mode (no tests will be triggered)');
+  }
 
   const [owner, repo] = REPO.split('/');
   const shortSha = COMMIT_SHA ? COMMIT_SHA.slice(0, 7) : 'unknown';
@@ -317,7 +321,17 @@ async function main() {
     buildComment(affectedTests, STAGING_URL, shortSha, true)
   );
 
-  // 4. Trigger mabl runs
+  // 4. Trigger mabl runs (skip if API key not configured)
+  if (apiKeyMissing) {
+    for (const test of affectedTests) {
+      test.status      = 'no-api-key';
+      test.statusLabel = '⚠️ API key not configured';
+    }
+    await postOrUpdateComment(owner, repo, buildComment(affectedTests, STAGING_URL, shortSha, false));
+    console.log('Preview mode — comment posted with affected tests. Add MABL_API_KEY secret to enable test triggering.');
+    return;
+  }
+
   for (const test of affectedTests) {
     try {
       const run = await triggerPlanRun(test.id, STAGING_URL);
