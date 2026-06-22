@@ -1,0 +1,54 @@
+{
+  "mappings": [
+    {
+      "pattern": "src/components/browse/**",
+      "tests": [
+        {
+          "id": "YOUR_PLAN_ID_1",
+          "name": "Browse Player Tests",
+          "impact": "direct"
+        },
+        {
+          "id": "YOUR_PLAN_ID_2",
+          "name": "Navigation Regression",
+          "impact": "indirect"
+        }
+      ]
+    },
+    {
+      "pattern": "src/components/auth/**",
+      "tests": [
+        {
+          "id": "YOUR_PLAN_ID_3",
+          "name": "Auth Flow Tests",
+          "impact": "direct"
+        }
+      ]
+    },
+    {
+      "pattern": "src/components/**",
+      "tests": [
+        {
+          "id": "YOUR_PLAN_ID_4",
+          "name": "Full UI Regression",
+          "impact": "indirect"
+        }
+      ]
+    },
+    {
+      "pattern": "src/services/**",
+      "tests": [
+        {
+          "id": "YOUR_PLAN_ID_3",
+          "name": "Auth Flow Tests",
+          "impact": "indirect"
+        },
+        {
+          "id": "YOUR_PLAN_ID_4",
+          "name": "Full UI Regression",
+          "impact": "indirect"
+        }
+      ]
+    }
+  ]
+}
