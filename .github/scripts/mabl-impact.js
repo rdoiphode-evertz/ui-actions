@@ -47,6 +47,7 @@ function matchesPattern(filePath, pattern) {
 // ─── mabl API ─────────────────────────────────────────────────────────────────
 
 async function mablRequest(endpoint, options = {}) {
+  const method = options.method || 'GET';
   const res = await fetch(`${MABL_API_BASE}${endpoint}`, {
     ...options,
     headers: {
@@ -56,6 +57,7 @@ async function mablRequest(endpoint, options = {}) {
     },
   });
   const body = await res.text();
+  console.log(`[mabl] ${method} ${endpoint} → ${res.status} ${res.ok ? 'OK' : 'FAILED'}`);
   if (!res.ok) throw new Error(`mabl API ${endpoint} → HTTP ${res.status}: ${body}`);
   return JSON.parse(body);
 }
@@ -79,6 +81,7 @@ async function getPlanRunStatus(runId) {
 // ─── GitHub API ───────────────────────────────────────────────────────────────
 
 async function githubRequest(endpoint, options = {}) {
+  const method = options.method || 'GET';
   const res = await fetch(`${GITHUB_API_BASE}${endpoint}`, {
     ...options,
     headers: {
@@ -90,6 +93,7 @@ async function githubRequest(endpoint, options = {}) {
     },
   });
   const body = await res.text();
+  console.log(`[github] ${method} ${endpoint} → ${res.status} ${res.ok ? 'OK' : 'FAILED'}`);
   if (!res.ok) throw new Error(`GitHub API ${endpoint} → HTTP ${res.status}: ${body}`);
   return body ? JSON.parse(body) : {};
 }
