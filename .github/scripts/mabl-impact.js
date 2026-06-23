@@ -1,49 +1,50 @@
 #!/usr/bin/env node
 
 // mabl Impact Check Script
-// Triggered by GitHub Actions on every PR push.
-// Flow:
-//   1. Match changed files against .github/mabl-mapping.json
-//   2. Post PR comment with affected tests showing ⚪ Not run + ▶ Run buttons
-//   Tests only run when a reviewer clicks ▶ Run (handled by Vercel function + mabl-manual-run.yml)
+// Handles two event actions:
+//   created — staging URL comment posted → match changed files → post checkbox list
+//   edited  — reviewer checked a box     → trigger mabl run  → poll → update that line
 
 'use strict';
 
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
 
-// ─── Config ────────────────────────────────────────────────────────────────
-
-const MABL_API_BASE      = 'https://api.mabl.com';
-const MABL_APP_BASE      = 'https://app.mabl.com';
-const GITHUB_API_BASE    = 'https://api.github.com';
-const COMMENT_MARKER     = '<!-- mabl-impact-check -->';
+const MABL_API_BASE    = 'https://api.mabl.com';
+const GITHUB_API_BASE  = 'https://api.github.com';
+const COMMENT_MARKER   = '<!-- mabl-impact-check -->';
+const PLAN_ID_REGEX    = /<!-- plan:([^>]+) -->/;
+const STAGING_REGEX    = /<!-- staging:([\w.-]+) -->/;
+const POLL_INTERVAL_MS = 30_000;
+const MAX_WAIT_MS      = 35 * 60_000;
 
 const {
   MABL_API_KEY,
-  MABL_WORKSPACE_ID,
   GITHUB_TOKEN,
   PR_NUMBER,
   COMMIT_SHA,
   REPO,
-  STAGING_URL,
+  EVENT_ACTION,
   CHANGED_FILES,
-  EVENT_NAME,
-  RUN_BUTTON_BASE_URL, // e.g. https://your-app.vercel.app/api/run — set after Vercel deploy
+  COMMENT_ID,
 } = process.env;
 
-// ─── Glob matching (no external deps) ──────────────────────────────────────
+// Comment bodies written by workflow step using toJSON() — parse as JSON strings
+const COMMENT_BODY      = JSON.parse(fs.readFileSync('/tmp/comment-body.json', 'utf8')) || '';
+const COMMENT_BODY_FROM = JSON.parse(fs.readFileSync('/tmp/comment-body-from.json', 'utf8')) || '';
+
+// ─── Glob matching ────────────────────────────────────────────────────────────
 
 function matchesPattern(filePath, pattern) {
   const regexStr = pattern
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&') // escape regex special chars except * and ?
-    .replace(/\*\*/g, '\x00')              // temporarily replace **
-    .replace(/\*/g, '[^/]*')               // * matches within one segment
-    .replace(/\x00/g, '.*');              // ** matches across segments
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '\x00')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\x00/g, '.*');
   return new RegExp(`^${regexStr}$`).test(filePath);
 }
 
-// ─── mabl API ───────────────────────────────────────────────────────────────
+// ─── mabl API ─────────────────────────────────────────────────────────────────
 
 async function mablRequest(endpoint, options = {}) {
   const res = await fetch(`${MABL_API_BASE}${endpoint}`, {
@@ -55,22 +56,27 @@ async function mablRequest(endpoint, options = {}) {
     },
   });
   const body = await res.text();
-  if (!res.ok) {
-    throw new Error(`mabl API ${endpoint} → HTTP ${res.status}: ${body}`);
-  }
+  if (!res.ok) throw new Error(`mabl API ${endpoint} → HTTP ${res.status}: ${body}`);
   return JSON.parse(body);
 }
 
-
-function mablPlanUrl(planId) {
-  return `${MABL_APP_BASE}/workspaces/${MABL_WORKSPACE_ID}/plans/${planId}`;
+async function triggerPlanRun(planId, stagingUrl) {
+  return mablRequest('/testing/api/v0/plan-runs', {
+    method: 'POST',
+    body: JSON.stringify({
+      plan_id: planId,
+      environment: {
+        uri: stagingUrl.startsWith('http') ? stagingUrl : `https://${stagingUrl}`,
+      },
+    }),
+  });
 }
 
-function mablRunUrl(planId, runId) {
-  return `${MABL_APP_BASE}/workspaces/${MABL_WORKSPACE_ID}/plans/${planId}/runs/${runId}`;
+async function getPlanRunStatus(runId) {
+  return mablRequest(`/testing/api/v0/plan-runs/${runId}`);
 }
 
-// ─── GitHub API ─────────────────────────────────────────────────────────────
+// ─── GitHub API ───────────────────────────────────────────────────────────────
 
 async function githubRequest(endpoint, options = {}) {
   const res = await fetch(`${GITHUB_API_BASE}${endpoint}`, {
@@ -84,24 +90,19 @@ async function githubRequest(endpoint, options = {}) {
     },
   });
   const body = await res.text();
-  if (!res.ok) {
-    throw new Error(`GitHub API ${endpoint} → HTTP ${res.status}: ${body}`);
-  }
+  if (!res.ok) throw new Error(`GitHub API ${endpoint} → HTTP ${res.status}: ${body}`);
   return body ? JSON.parse(body) : {};
 }
 
 async function findExistingComment(owner, repo) {
-  // GitHub paginates at 100 — for most PRs one page is enough
   const comments = await githubRequest(
     `/repos/${owner}/${repo}/issues/${PR_NUMBER}/comments?per_page=100`
   );
   return comments.find(c => c.body && c.body.includes(COMMENT_MARKER)) || null;
 }
 
-async function postOrUpdateComment(owner, repo, body) {
+async function postOrReplaceComment(owner, repo, body) {
   const fullBody = `${body}\n\n${COMMENT_MARKER}`;
-
-  // Delete old mabl comment if exists, then always create a fresh one
   const existing = await findExistingComment(owner, repo);
   if (existing) {
     await githubRequest(`/repos/${owner}/${repo}/issues/comments/${existing.id}`, {
@@ -109,7 +110,6 @@ async function postOrUpdateComment(owner, repo, body) {
     });
     console.log(`Deleted old comment #${existing.id}`);
   }
-
   await githubRequest(`/repos/${owner}/${repo}/issues/${PR_NUMBER}/comments`, {
     method: 'POST',
     body: JSON.stringify({ body: fullBody }),
@@ -117,123 +117,127 @@ async function postOrUpdateComment(owner, repo, body) {
   console.log('Posted new comment');
 }
 
-// ─── Comment formatting ──────────────────────────────────────────────────────
-
-function statusEmoji(status) {
-  const map = {
-    succeeded:  '✅',
-    failed:     '❌',
-    running:    '⏳',
-    scheduled:  '🔄',
-    cancelled:  '⚫',
-    skipped:    '⏭️',
-    pending:   '🔄',
-    'not-run': '⚪',
-  };
-  return map[status] || '❓';
+async function updateComment(owner, repo, commentId, body) {
+  await githubRequest(`/repos/${owner}/${repo}/issues/comments/${commentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ body }),
+  });
 }
 
-function formatDuration(ms) {
-  if (!ms) return '';
-  const s = Math.round(ms / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+// ─── Comment format ───────────────────────────────────────────────────────────
+
+function statusLabel(status, duration) {
+  const map = {
+    succeeded: '✅ Passed',
+    failed:    '❌ Failed',
+    running:   '⏳ Running',
+    scheduled: '🔄 Scheduled',
+    cancelled: '⚫ Cancelled',
+    skipped:   '⏭️ Skipped',
+    'not-run': '⚪ Not run',
+  };
+  const label = map[status] || '❓ Unknown';
+  if (!duration) return label;
+  const s = Math.round(duration / 1000);
+  const d = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${label} (${d})`;
 }
 
 function buildComment(tests, stagingUrl, shortSha) {
   const direct   = tests.filter(t => t.impact === 'direct');
   const indirect = tests.filter(t => t.impact === 'indirect');
-  const header   = `## mabl Test Impact`;
 
-  const formatRow = (t) => {
-    const emoji    = statusEmoji(t.status);
-    const label    = t.statusLabel || t.status || 'pending';
-    const duration = t.duration ? ` (${formatDuration(t.duration)})` : '';
-    // If run completed → link to that run's results
-    // If Vercel function configured → show ▶ Run button (triggers new run via Vercel)
-    // Otherwise → link to the plan page in mabl UI
-    let actionLink;
-    if (t.runUrl) {
-      actionLink = `[Open Run ↗](${t.runUrl})`;
-    } else if (RUN_BUTTON_BASE_URL) {
-      const params = new URLSearchParams({
-        plan: t.id,
-        pr: PR_NUMBER,
-        staging_url: STAGING_URL,
-        plan_name: t.name,
-        commit_sha: COMMIT_SHA || '',
-      });
-      actionLink = `[▶ Run](${RUN_BUTTON_BASE_URL}?${params})`;
-    } else {
-      actionLink = `[▶ Run](${mablPlanUrl(t.id)})`;
-    }
-    return `| ${t.name} | ${emoji} ${label}${duration} | ${actionLink} |`;
-  };
+  // Plan ID embedded in hidden HTML comment — invisible in rendered markdown
+  const line = (t) =>
+    `- [ ] <!-- plan:${t.id} --> ${t.name} · ${statusLabel('not-run')}`;
 
-  const table = (list) => {
-    if (list.length === 0) return '_None_\n';
-    return [
-      '| Test Plan | Status | Action |',
-      '|-----------|--------|--------|',
-      ...list.map(formatRow),
-    ].join('\n') + '\n';
-  };
+  const section = (list) =>
+    list.length === 0 ? '_None_\n' : list.map(line).join('\n') + '\n';
 
   const now = new Date().toUTCString();
 
-  return `${header}
+  return `## mabl Test Impact
+<!-- staging:${stagingUrl} -->
 
 **Commit:** \`${shortSha}\` | **Staging:** [${stagingUrl}](https://${stagingUrl})
 **Last updated:** ${now}
 
 ### 🔴 Directly Impacted
-${table(direct)}
+${section(direct)}
 ### 🟡 Indirectly Impacted
-${table(indirect)}
+${section(indirect)}
 ---
-_Click **▶ Run** to trigger a test against the staging URL · [View mapping config](.github/mabl-mapping.json)_`;
+_Check a box to trigger that test against the staging URL · [View mapping](.github/mabl-mapping.json)_`;
 }
 
-// ─── Polling ─────────────────────────────────────────────────────────────────
+// ─── Checkbox detection ───────────────────────────────────────────────────────
 
-// ─── Main ────────────────────────────────────────────────────────────────────
+function findCheckedPlan(oldBody, newBody) {
+  const oldLines = oldBody.split('\n');
+  const newLines = newBody.split('\n');
+  for (let i = 0; i < Math.max(oldLines.length, newLines.length); i++) {
+    const oldLine = oldLines[i] || '';
+    const newLine = newLines[i] || '';
+    // Detect [ ] → [x] transition on same line
+    if (oldLine.includes('- [ ]') && newLine.includes('- [x]')) {
+      const match = newLine.match(PLAN_ID_REGEX);
+      if (match) return match[1];
+    }
+  }
+  return null;
+}
 
-async function main() {
-  if (!PR_NUMBER)   throw new Error('PR_NUMBER is not set');
-  if (!STAGING_URL) throw new Error('STAGING_URL is not set');
+function extractStagingUrl(body) {
+  const match = body.match(STAGING_REGEX);
+  return match ? match[1] : null;
+}
 
+// Replace status text after · on the matching plan line — idempotent
+function updateLineStatus(body, planId, status, duration) {
+  return body.split('\n').map(line => {
+    if (line.includes(`<!-- plan:${planId} -->`)) {
+      return line.replace(/· .*$/, `· ${statusLabel(status, duration)}`);
+    }
+    return line;
+  }).join('\n');
+}
+
+// ─── Polling ──────────────────────────────────────────────────────────────────
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isTerminal(status) {
+  return ['succeeded', 'failed', 'cancelled', 'skipped'].includes(status);
+}
+
+// ─── Case 1: new staging comment ─────────────────────────────────────────────
+
+async function handleNewStagingComment() {
   const [owner, repo] = REPO.split('/');
   const shortSha = COMMIT_SHA ? COMMIT_SHA.slice(0, 7) : 'unknown';
 
-  console.log(`PR: #${PR_NUMBER} | Commit: ${shortSha} | Staging: ${STAGING_URL}`);
+  const stagingUrl = COMMENT_BODY.match(/[\w.-]+\.staging\.evertz\.tools/)?.[0];
+  if (!stagingUrl) throw new Error('No staging URL found in comment');
 
-  // 1. Load mapping
+  console.log(`PR #${PR_NUMBER} | Commit: ${shortSha} | Staging: ${stagingUrl}`);
+
   const mappingPath = path.join(process.cwd(), '.github', 'mabl-mapping.json');
   const mapping = JSON.parse(fs.readFileSync(mappingPath, 'utf8'));
 
-  // 2. Match changed files → affected tests
   const changedFiles = CHANGED_FILES
     ? CHANGED_FILES.split(',').map(f => f.trim()).filter(Boolean)
     : [];
-
   console.log(`Changed files (${changedFiles.length}):`, changedFiles);
 
-  // Deduplicate by plan ID — direct impact wins over indirect
   const affectedMap = new Map();
-
   for (const { pattern, tests } of mapping.mappings) {
-    const matches = changedFiles.some(f => matchesPattern(f, pattern));
-    if (!matches) continue;
-
+    if (!changedFiles.some(f => matchesPattern(f, pattern))) continue;
     for (const test of tests) {
       const existing = affectedMap.get(test.id);
       if (!existing || (test.impact === 'direct' && existing.impact !== 'direct')) {
-        affectedMap.set(test.id, {
-          ...test,
-          status:      'not-run',
-          statusLabel: 'Not run',
-          runId:       null,
-          runUrl:      null,
-        });
+        affectedMap.set(test.id, { ...test });
       }
     }
   }
@@ -241,21 +245,110 @@ async function main() {
   const affectedTests = [...affectedMap.values()];
 
   if (affectedTests.length === 0) {
-    console.log('No affected mabl tests found for this change');
-    await postOrUpdateComment(owner, repo,
-      `## mabl Test Impact\n\n` +
-      `**Commit:** \`${shortSha}\` | **Staging:** [${STAGING_URL}](https://${STAGING_URL})\n\n` +
-      `No mabl tests are mapped to the files changed in this PR.\n\n` +
-      `_[View mapping config](.github/mabl-mapping.json)_`
+    await postOrReplaceComment(owner, repo,
+      `## mabl Test Impact\n\n**Commit:** \`${shortSha}\` | **Staging:** [${stagingUrl}](https://${stagingUrl})\n\nNo mabl tests mapped to the changed files.\n\n_[View mapping](.github/mabl-mapping.json)_`
     );
     return;
   }
 
   console.log(`Affected tests: ${affectedTests.map(t => t.name).join(', ')}`);
+  await postOrReplaceComment(owner, repo, buildComment(affectedTests, stagingUrl, shortSha));
+  console.log('Comment posted. Reviewer can check a box to trigger a test.');
+}
 
-  // 3. Post comment — tests show ⚪ Not run with ▶ Run buttons
-  await postOrUpdateComment(owner, repo, buildComment(affectedTests, STAGING_URL, shortSha));
-  console.log('Comment posted. Tests will run when reviewer clicks ▶ Run.');
+// ─── Case 2: checkbox checked ─────────────────────────────────────────────────
+
+async function handleCheckboxChecked() {
+  if (!COMMENT_BODY_FROM) {
+    console.log('No previous body — skipping');
+    return;
+  }
+
+  const planId = findCheckedPlan(COMMENT_BODY_FROM, COMMENT_BODY);
+  if (!planId) {
+    console.log('No checkbox [ ] → [x] transition found — skipping');
+    return;
+  }
+  console.log(`Checkbox checked for plan: ${planId}`);
+
+  const stagingUrl = extractStagingUrl(COMMENT_BODY);
+  if (!stagingUrl) throw new Error('Could not extract staging URL from comment body');
+
+  const [owner, repo] = REPO.split('/');
+
+  if (!MABL_API_KEY) {
+    console.warn('MABL_API_KEY not set — marking as failed');
+    const body = updateLineStatus(COMMENT_BODY, planId, 'failed');
+    await updateComment(owner, repo, COMMENT_ID,
+      body + '\n\n> ⚠️ `MABL_API_KEY` secret is not configured'
+    );
+    return;
+  }
+
+  // Show "running" immediately
+  let currentBody = updateLineStatus(COMMENT_BODY, planId, 'running');
+  await updateComment(owner, repo, COMMENT_ID, currentBody);
+
+  // Trigger mabl run
+  let runId;
+  try {
+    const run = await triggerPlanRun(planId, stagingUrl);
+    runId = run.id;
+    console.log(`Triggered run ${runId} for plan ${planId}`);
+  } catch (err) {
+    console.error('Failed to trigger mabl run:', err.message);
+    currentBody = updateLineStatus(currentBody, planId, 'failed');
+    await updateComment(owner, repo, COMMENT_ID, currentBody);
+    return;
+  }
+
+  // Poll until terminal or timeout
+  const startTime = Date.now();
+  let status = 'running';
+  let duration = null;
+
+  while (true) {
+    if (Date.now() - startTime > MAX_WAIT_MS) {
+      console.log('Poll timeout — marking as failed');
+      status = 'failed';
+      currentBody = updateLineStatus(currentBody, planId, status);
+      await updateComment(owner, repo, COMMENT_ID, currentBody);
+      break;
+    }
+
+    await sleep(POLL_INTERVAL_MS);
+
+    try {
+      const run = await getPlanRunStatus(runId);
+      status   = run.status;
+      duration = run.completion_time ? run.completion_time - run.start_time : null;
+      console.log(`Run ${runId}: ${status}`);
+    } catch (err) {
+      console.warn(`Poll error: ${err.message}`);
+    }
+
+    currentBody = updateLineStatus(currentBody, planId, status, duration);
+    await updateComment(owner, repo, COMMENT_ID, currentBody);
+
+    if (isTerminal(status)) {
+      console.log(`Run complete: ${status}`);
+      break;
+    }
+  }
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+async function main() {
+  if (!PR_NUMBER) throw new Error('PR_NUMBER is not set');
+
+  if (EVENT_ACTION === 'created') {
+    await handleNewStagingComment();
+  } else if (EVENT_ACTION === 'edited') {
+    await handleCheckboxChecked();
+  } else {
+    throw new Error(`Unexpected EVENT_ACTION: ${EVENT_ACTION}`);
+  }
 }
 
 main().catch(err => {

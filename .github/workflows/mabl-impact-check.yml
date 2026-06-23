@@ -2,18 +2,22 @@ name: mabl Impact Check
 
 on:
   issue_comment:
-    types: [created]
+    types: [created, edited]
 
 jobs:
   mabl-impact:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Only run when:
-    # 1. Comment is on a PR (not a plain issue)
-    # 2. Comment contains a staging URL
+    # Prevent infinite loop: ignore bot edits (bot updates comment status → fires edited event)
+    # created: fires when staging URL comment is posted
+    # edited:  fires when reviewer checks a checkbox in the mabl impact comment
     if: |
       github.event.issue.pull_request != null &&
-      contains(github.event.comment.body, 'staging.evertz.tools')
+      github.event.sender.type != 'Bot' &&
+      (
+        (github.event.action == 'created' && contains(github.event.comment.body, 'staging.evertz.tools')) ||
+        (github.event.action == 'edited' && contains(github.event.comment.body, '<!-- mabl-impact-check -->'))
+      )
     permissions:
       pull-requests: write
       contents: read
@@ -22,17 +26,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Extract staging URL from comment
-        id: extract
+      - name: Save comment bodies to files
+        # toJSON() safely encodes multiline strings — parse with JSON.parse in script
+        env:
+          COMMENT_BODY_JSON: ${{ toJSON(github.event.comment.body) }}
+          COMMENT_BODY_FROM_JSON: ${{ toJSON(github.event.changes.body.from) }}
         run: |
-          COMMENT="${{ github.event.comment.body }}"
-          # Extract URL matching pattern: <something>.staging.evertz.tools
-          STAGING_URL=$(echo "$COMMENT" | grep -oP '[\w.-]+\.staging\.evertz\.tools' | head -1)
-          echo "staging_url=$STAGING_URL" >> $GITHUB_OUTPUT
-          echo "Extracted staging URL: $STAGING_URL"
+          echo "$COMMENT_BODY_JSON" > /tmp/comment-body.json
+          echo "$COMMENT_BODY_FROM_JSON" > /tmp/comment-body-from.json
 
       - name: Get changed files for this PR
         id: changed-files
+        if: github.event.action == 'created'
         run: |
           FILES=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}/files \
             --jq '[.[].filename] | join(",")')
@@ -52,10 +57,9 @@ jobs:
           MABL_WORKSPACE_ID: ${{ secrets.MABL_WORKSPACE_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.issue.number }}
-          COMMIT_SHA: ${{ github.event.issue.pull_request && github.sha }}
+          COMMIT_SHA: ${{ github.sha }}
           REPO: ${{ github.repository }}
-          EVENT_NAME: ${{ github.event_name }}
-          STAGING_URL: ${{ steps.extract.outputs.staging_url }}
+          EVENT_ACTION: ${{ github.event.action }}
           CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
-          RUN_BUTTON_BASE_URL: ${{ secrets.RUN_BUTTON_BASE_URL }}
+          COMMENT_ID: ${{ github.event.comment.id }}
         run: node .github/scripts/mabl-impact.js
