@@ -1,21 +1,19 @@
 name: mabl Impact Check
 
 on:
-  workflow_dispatch:
-    inputs:
-      staging_url:
-        description: 'Staging URL to run mabl tests against (e.g. abc123.eio-ops.staging.evertz.tools)'
-        required: true
-      pr_number:
-        description: 'PR number to post results to'
-        required: true
-      changed_files:
-        description: 'Comma-separated list of changed files (e.g. src/components/browse/player.ts)'
-        required: false
+  issue_comment:
+    types: [created]
 
 jobs:
   mabl-impact:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Only run when:
+    # 1. Comment is on a PR (not a plain issue)
+    # 2. Comment contains a staging URL
+    if: |
+      github.event.issue.pull_request != null &&
+      contains(github.event.comment.body, 'staging.evertz.tools')
     permissions:
       pull-requests: write
       contents: read
@@ -23,6 +21,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Extract staging URL from comment
+        id: extract
+        run: |
+          COMMENT="${{ github.event.comment.body }}"
+          # Extract URL matching pattern: <something>.staging.evertz.tools
+          STAGING_URL=$(echo "$COMMENT" | grep -oP '[\w.-]+\.staging\.evertz\.tools' | head -1)
+          echo "staging_url=$STAGING_URL" >> $GITHUB_OUTPUT
+          echo "Extracted staging URL: $STAGING_URL"
+
+      - name: Get changed files for this PR
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+        with:
+          separator: ','
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -34,10 +47,11 @@ jobs:
           MABL_API_KEY: ${{ secrets.MABL_API_KEY }}
           MABL_WORKSPACE_ID: ${{ secrets.MABL_WORKSPACE_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          COMMIT_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          COMMIT_SHA: ${{ github.event.issue.pull_request && github.sha }}
           REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
-          STAGING_URL: ${{ inputs.staging_url }}
-          CHANGED_FILES: ${{ inputs.changed_files }}
+          STAGING_URL: ${{ steps.extract.outputs.staging_url }}
+          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+          RUN_BUTTON_BASE_URL: ${{ secrets.RUN_BUTTON_BASE_URL }}
         run: node .github/scripts/mabl-impact.js
