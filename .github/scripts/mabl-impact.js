@@ -100,21 +100,21 @@ async function findExistingComment(owner, repo) {
 
 async function postOrUpdateComment(owner, repo, body) {
   const fullBody = `${body}\n\n${COMMENT_MARKER}`;
-  const existing = await findExistingComment(owner, repo);
 
+  // Delete old mabl comment if exists, then always create a fresh one
+  const existing = await findExistingComment(owner, repo);
   if (existing) {
     await githubRequest(`/repos/${owner}/${repo}/issues/comments/${existing.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ body: fullBody }),
+      method: 'DELETE',
     });
-    console.log(`Updated comment #${existing.id}`);
-  } else {
-    await githubRequest(`/repos/${owner}/${repo}/issues/${PR_NUMBER}/comments`, {
-      method: 'POST',
-      body: JSON.stringify({ body: fullBody }),
-    });
-    console.log('Posted new comment');
+    console.log(`Deleted old comment #${existing.id}`);
   }
+
+  await githubRequest(`/repos/${owner}/${repo}/issues/${PR_NUMBER}/comments`, {
+    method: 'POST',
+    body: JSON.stringify({ body: fullBody }),
+  });
+  console.log('Posted new comment');
 }
 
 // ─── Comment formatting ──────────────────────────────────────────────────────
