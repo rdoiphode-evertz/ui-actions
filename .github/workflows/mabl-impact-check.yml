@@ -11,13 +11,11 @@ jobs:
     # Prevent infinite loop: ignore bot edits (bot updates comment status → fires edited event)
     # created: fires when staging URL comment is posted
     # edited:  fires when reviewer checks a checkbox in the mabl impact comment
-    if: |
+    if: >-
       github.event.issue.pull_request != null &&
       github.event.sender.type != 'Bot' &&
-      (
-        (github.event.action == 'created' && contains(github.event.comment.body, 'staging.evertz.tools')) ||
-        (github.event.action == 'edited' && contains(github.event.comment.body, '<!-- mabl-impact-check -->'))
-      )
+      ((github.event.action == 'created' && contains(github.event.comment.body, 'staging.evertz.tools')) ||
+      (github.event.action == 'edited' && contains(github.event.comment.body, '<!-- mabl-impact-check -->')))
     permissions:
       pull-requests: write
       contents: read
