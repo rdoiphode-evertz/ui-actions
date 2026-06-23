@@ -164,7 +164,7 @@ function buildComment(tests, stagingUrl, shortSha) {
       });
       actionLink = `[▶ Run](${RUN_BUTTON_BASE_URL}?${params})`;
     } else {
-      actionLink = `[Open Plan ↗](${mablPlanUrl(t.id)})`;
+      actionLink = `[▶ Run](${mablPlanUrl(t.id)})`;
     }
     return `| ${t.name} | ${emoji} ${label}${duration} | ${actionLink} |`;
   };
