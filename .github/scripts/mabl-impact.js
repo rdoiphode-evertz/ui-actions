@@ -434,17 +434,6 @@ async function handleCheckboxChecked() {
 
   const [owner, repo] = REPO.split('/');
 
-  // Guard: without MABL_API_KEY we cannot trigger any test runs
-  // Mark as failed immediately so the reviewer knows something is misconfigured
-  if (!MABL_API_KEY) {
-    console.warn('MABL_API_KEY not set — marking as failed');
-    const body = updateLineStatus(COMMENT_BODY, planId, 'failed');
-    await updateComment(owner, repo, COMMENT_ID,
-      body + '\n\n> ⚠️ `MABL_API_KEY` secret is not configured'
-    );
-    return;
-  }
-
   // Step 1: Immediately show ⏳ Running on the checked line so reviewer gets
   // instant feedback that their click was registered
   let currentBody = updateLineStatus(COMMENT_BODY, planId, 'running');
