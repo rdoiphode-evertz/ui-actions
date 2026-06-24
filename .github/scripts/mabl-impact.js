@@ -218,6 +218,17 @@ async function updateComment(owner, repo, commentId, body) {
   });
 }
 
+// Fetches the current live body of a comment from GitHub API.
+// Used before every write to avoid the race condition where concurrent checkbox
+// runs overwrite each other's status updates. Each run only modifies its own
+// plan line — by re-fetching first, all other lines are always preserved.
+//
+// API: GET /repos/{owner}/{repo}/issues/comments/{comment_id}
+async function getCommentBody(owner, repo, commentId) {
+  const comment = await githubRequest(`/repos/${owner}/${repo}/issues/comments/${commentId}`);
+  return comment.body;
+}
+
 // ─── Comment formatting ───────────────────────────────────────────────────────
 
 // Maps mabl run status values to human-readable labels with emoji.
@@ -435,8 +446,11 @@ async function handleCheckboxChecked() {
   const [owner, repo] = REPO.split('/');
 
   // Step 1: Immediately show ⏳ Running on the checked line so reviewer gets
-  // instant feedback that their click was registered
-  let currentBody = updateLineStatus(COMMENT_BODY, planId, 'running');
+  // instant feedback that their click was registered.
+  // Re-fetch the live comment body first — if multiple checkboxes were clicked in
+  // quick succession, other runs may have already updated their own lines. Using the
+  // stale COMMENT_BODY snapshot would overwrite those updates back to "Not run".
+  let currentBody = updateLineStatus(await getCommentBody(owner, repo, COMMENT_ID), planId, 'running');
   await updateComment(owner, repo, COMMENT_ID, currentBody);
 
   // Step 2: Trigger the mabl test run
@@ -450,9 +464,10 @@ async function handleCheckboxChecked() {
     runId = run.id;
     console.log(`Triggered run ${runId} for plan ${planId}`);
   } catch (err) {
-    // If mabl API call fails (wrong key, plan not found, etc.), mark as failed
+    // If mabl API call fails (wrong key, plan not found, etc.), mark as failed.
+    // Re-fetch live body before writing to avoid overwriting concurrent run updates.
     console.error('Failed to trigger mabl run:', err.message);
-    currentBody = updateLineStatus(currentBody, planId, 'failed');
+    currentBody = updateLineStatus(await getCommentBody(owner, repo, COMMENT_ID), planId, 'failed');
     await updateComment(owner, repo, COMMENT_ID, currentBody);
     return;
   }
@@ -469,7 +484,7 @@ async function handleCheckboxChecked() {
     if (Date.now() - startTime > MAX_WAIT_MS) {
       console.log('Poll timeout — marking as failed');
       status = 'failed';
-      currentBody = updateLineStatus(currentBody, planId, status);
+      currentBody = updateLineStatus(await getCommentBody(owner, repo, COMMENT_ID), planId, status);
       await updateComment(owner, repo, COMMENT_ID, currentBody);
       break;
     }
@@ -489,8 +504,9 @@ async function handleCheckboxChecked() {
       console.warn(`Poll error: ${err.message}`);
     }
 
-    // Update the PR comment line with current status (and duration if complete)
-    currentBody = updateLineStatus(currentBody, planId, status, duration);
+    // Update the PR comment line with current status (and duration if complete).
+    // Re-fetch live body so concurrent runs updating other lines are preserved.
+    currentBody = updateLineStatus(await getCommentBody(owner, repo, COMMENT_ID), planId, status, duration);
     await updateComment(owner, repo, COMMENT_ID, currentBody);
 
     // Stop polling when run reaches a final state
