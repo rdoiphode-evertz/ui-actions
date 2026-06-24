@@ -1,5 +1,34 @@
 name: mabl Impact Check
 
+# =============================================================================
+# Workflow: mabl Impact Check
+# =============================================================================
+# Purpose:
+#   Automatically shows which mabl tests are affected by a PR's file changes,
+#   and allows reviewers to trigger individual test runs by checking a checkbox.
+#
+# Triggers (both use issue_comment event):
+#
+#   1. CREATED — someone posts a staging URL comment on the PR
+#      e.g. "Staging: abc123.eio-ops.staging.evertz.tools"
+#      → Action: detect changed files, post checkbox list of affected tests
+#
+#   2. EDITED — reviewer checks a checkbox in the mabl impact comment
+#      GitHub edits the comment ([ ] → [x]) which fires the edited event
+#      → Action: detect which box was checked, trigger that mabl test run,
+#                poll for result, update that line with live status
+#
+# Infinite loop prevention:
+#   When our script updates the comment (PATCH), GitHub fires another 'edited'
+#   event. We block this using: github.event.sender.type != 'Bot'
+#   Bot edits (from github-actions[bot]) are ignored. Only human edits proceed.
+#
+# No PR Checks bar entry:
+#   Using issue_comment trigger instead of pull_request means this workflow
+#   does NOT appear in the PR "Checks" section. It only shows as a comment,
+#   similar to how filebased-rnd-tools posts staging/build comments.
+# =============================================================================
+
 on:
   issue_comment:
     types: [created, edited]
@@ -7,25 +36,41 @@ on:
 jobs:
   mabl-impact:
     runs-on: ubuntu-latest
+
+    # Max 45 minutes — mabl tests take 15–30 min, polling runs up to 35 min.
+    # Workflow timeout must be higher than MAX_WAIT_MS in the script (35 min).
     timeout-minutes: 45
-    # Prevent infinite loop: ignore bot edits (bot updates comment status → fires edited event)
-    # created: fires when staging URL comment is posted
-    # edited:  fires when reviewer checks a checkbox in the mabl impact comment
+
+    # Condition gates — workflow only runs when ALL of these are true:
+    #   1. Comment is on a PR (not a plain issue) — pull_request field is not null
+    #   2. Comment author is a human — blocks bot edit re-triggers (infinite loop)
+    #   3. Comment contains staging URL (created) OR our mabl marker (edited)
+    #      - 'staging.evertz.tools' — identifies a staging URL comment
+    #      - 'mabl-impact-check'   — identifies our mabl comment being edited
     if: |
       github.event.issue.pull_request != null &&
       github.event.sender.type != 'Bot' &&
-      (contains(github.event.comment.body, 'staging.evertz.tools') ||
+      (contains(github.event.comment.body, 'eio-ops.staging.evertz.tools') ||
       contains(github.event.comment.body, 'mabl-impact-check'))
+
     permissions:
-      pull-requests: write
-      contents: read
+      pull-requests: write  # needed to post/edit/delete PR comments
+      contents: read        # needed to checkout the repo and read mabl-mapping.json
 
     steps:
       - name: Checkout
+        # Checks out the repo so the script and mabl-mapping.json are available
         uses: actions/checkout@v4
 
       - name: Save comment bodies to files
-        # toJSON() safely encodes multiline strings — parse with JSON.parse in script
+        # The comment body can contain special characters (backticks, $, newlines, quotes).
+        # Passing them directly as env vars can corrupt the values.
+        # Solution: toJSON() encodes the string as valid JSON, then the script
+        # reads the file and JSON.parse()s it — fully safe for any content.
+        #
+        # COMMENT_BODY_JSON     = current comment body (after checkbox check for 'edited')
+        # COMMENT_BODY_FROM_JSON = comment body before the edit (only set for 'edited' events,
+        #                          null for 'created' events)
         env:
           COMMENT_BODY_JSON: ${{ toJSON(github.event.comment.body) }}
           COMMENT_BODY_FROM_JSON: ${{ toJSON(github.event.changes.body.from) }}
@@ -35,12 +80,24 @@ jobs:
 
       - name: Get changed files for this PR
         id: changed-files
+        # Only needed for 'created' events — when staging URL is posted, we need
+        # to know which files changed to match against mabl-mapping.json patterns.
+        # Skipped for 'edited' events (checkbox clicks) — staging URL is already
+        # embedded in the existing mabl comment.
         if: github.event.action == 'created'
         run: |
+          # --paginate fetches ALL pages of results automatically.
+          # Without it, only the first 30 files are returned (default page size).
+          # PRs can have 500+ changed files — --paginate ensures none are missed.
+          # GitHub API hard caps PR files at 3000 regardless of pagination.
+          #
+          # .[].filename outputs one filename per line (works across paginated pages).
+          # tr '\n' ',' joins them into a single comma-separated string for the script.
           FILES=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}/files \
-            --jq '[.[].filename] | join(",")')
+            --paginate \
+            --jq '.[].filename' | tr '\n' ',')
           echo "all_changed_files=$FILES" >> $GITHUB_OUTPUT
-          echo "Changed files: $FILES"
+          echo "Changed files count: $(echo "$FILES" | tr ',' '\n' | grep -c .)"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -50,14 +107,38 @@ jobs:
           node-version: '20'
 
       - name: Run mabl impact check
+        # Runs mabl-impact.js which handles both event cases:
+        #   EVENT_ACTION=created → handleNewStagingComment()
+        #   EVENT_ACTION=edited  → handleCheckboxChecked()
         env:
+          # mabl CI/CD API key — stored in GitHub repo Secrets
+          # Used to trigger plan runs and poll run status via mabl REST API
           MABL_API_KEY: ${{ secrets.MABL_API_KEY }}
+
+          # mabl workspace ID — found in the mabl app URL:
+          # app.mabl.com/workspaces/<WORKSPACE_ID>/...
           MABL_WORKSPACE_ID: ${{ secrets.MABL_WORKSPACE_ID }}
+
+          # GitHub token — auto-provided by Actions
+          # Used to post/edit/delete PR comments via GitHub REST API
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # PR number — used in GitHub API paths for comment operations
           PR_NUMBER: ${{ github.event.issue.number }}
+
+          # Full commit SHA — shown in the comment header (shortened to 7 chars)
           COMMIT_SHA: ${{ github.sha }}
+
+          # "owner/repo" format — e.g. "rdoiphode-evertz/ui-actions"
           REPO: ${{ github.repository }}
+
+          # "created" or "edited" — tells the script which handler to run
           EVENT_ACTION: ${{ github.event.action }}
+
+          # Comma-separated changed files list — only set for 'created' events
           CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+
+          # ID of the comment that was edited — only relevant for 'edited' events
+          # Used to PATCH the correct comment when updating checkbox line status
           COMMENT_ID: ${{ github.event.comment.id }}
         run: node .github/scripts/mabl-impact.js
