@@ -445,6 +445,7 @@ async function handleCheckboxChecked() {
   // Response: { id: runId, status: "scheduled" }
   let runId;
   try {
+    console.log(`Triggering mabl run — plan: ${planId} | staging: https://${stagingUrl}`);
     const run = await triggerPlanRun(planId, stagingUrl);
     runId = run.id;
     console.log(`Triggered run ${runId} for plan ${planId}`);
