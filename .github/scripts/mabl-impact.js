@@ -229,6 +229,52 @@ async function getCommentBody(owner, repo, commentId) {
   return comment.body;
 }
 
+// Writes a status update for a single plan line and verifies the write stuck.
+//
+// Problem: when multiple checkbox runs complete at the same time, they all
+// re-fetch the comment body within the same millisecond window (before any of
+// them has written). They all get the same snapshot and overwrite each other.
+//
+// Solution: after writing, wait briefly then re-fetch and check that our line
+// still shows the expected status. If another run overwrote it, retry with a
+// random jitter delay so concurrent runs desynchronize and stop colliding.
+// After MAX_WRITE_ATTEMPTS we give up (all retries logged to Actions console).
+const MAX_WRITE_ATTEMPTS = 5;
+
+async function writeLineStatus(owner, repo, commentId, planId, status, duration) {
+  const expectedLabel = statusLabel(status, duration);
+
+  for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      // Random jitter (0–2s) + linear backoff so concurrent runs desynchronize
+      const jitter = Math.floor(Math.random() * 2000);
+      const delay  = 1000 * attempt + jitter;
+      console.log(`writeLineStatus retry ${attempt}/${MAX_WRITE_ATTEMPTS - 1}: waiting ${delay}ms`);
+      await sleep(delay);
+    }
+
+    // Re-fetch live body so we never overwrite another run's line
+    const liveBody    = await getCommentBody(owner, repo, commentId);
+    const updatedBody = updateLineStatus(liveBody, planId, status, duration);
+    await updateComment(owner, repo, commentId, updatedBody);
+
+    // Brief pause to let GitHub persist the write before we verify
+    await sleep(500);
+
+    // Confirm our line shows the expected status
+    const checkBody = await getCommentBody(owner, repo, commentId);
+    const ourLine   = checkBody.split('\n').find(l => l.includes(`<!-- plan:${planId} -->`));
+    if (ourLine && ourLine.includes(expectedLabel)) {
+      if (attempt > 0) console.log(`writeLineStatus confirmed on attempt ${attempt + 1}`);
+      return;
+    }
+
+    console.log(`writeLineStatus attempt ${attempt + 1}: our write was overwritten, retrying...`);
+  }
+
+  console.warn(`writeLineStatus: could not confirm status "${status}" for plan ${planId} after ${MAX_WRITE_ATTEMPTS} attempts`);
+}
+
 // ─── Comment formatting ───────────────────────────────────────────────────────
 
 // Maps mabl run status values to human-readable labels with emoji.
@@ -447,11 +493,9 @@ async function handleCheckboxChecked() {
 
   // Step 1: Immediately show ⏳ Running on the checked line so reviewer gets
   // instant feedback that their click was registered.
-  // Re-fetch the live comment body first — if multiple checkboxes were clicked in
-  // quick succession, other runs may have already updated their own lines. Using the
-  // stale COMMENT_BODY snapshot would overwrite those updates back to "Not run".
-  let currentBody = updateLineStatus(await getCommentBody(owner, repo, COMMENT_ID), planId, 'running');
-  await updateComment(owner, repo, COMMENT_ID, currentBody);
+  // writeLineStatus re-fetches live body, writes, then verifies the write stuck —
+  // retrying with jitter if a concurrent run overwrote it.
+  await writeLineStatus(owner, repo, COMMENT_ID, planId, 'running');
 
   // Step 2: Trigger the mabl test run
   // POST https://api.mabl.com/testing/api/v0/plan-runs
@@ -464,11 +508,8 @@ async function handleCheckboxChecked() {
     runId = run.id;
     console.log(`Triggered run ${runId} for plan ${planId}`);
   } catch (err) {
-    // If mabl API call fails (wrong key, plan not found, etc.), mark as failed.
-    // Re-fetch live body before writing to avoid overwriting concurrent run updates.
     console.error('Failed to trigger mabl run:', err.message);
-    currentBody = updateLineStatus(await getCommentBody(owner, repo, COMMENT_ID), planId, 'failed');
-    await updateComment(owner, repo, COMMENT_ID, currentBody);
+    await writeLineStatus(owner, repo, COMMENT_ID, planId, 'failed');
     return;
   }
 
@@ -483,9 +524,7 @@ async function handleCheckboxChecked() {
     // Safety timeout: give up after 35 minutes (workflow itself times out at 45 min)
     if (Date.now() - startTime > MAX_WAIT_MS) {
       console.log('Poll timeout — marking as failed');
-      status = 'failed';
-      currentBody = updateLineStatus(await getCommentBody(owner, repo, COMMENT_ID), planId, status);
-      await updateComment(owner, repo, COMMENT_ID, currentBody);
+      await writeLineStatus(owner, repo, COMMENT_ID, planId, 'failed');
       break;
     }
 
@@ -504,10 +543,8 @@ async function handleCheckboxChecked() {
       console.warn(`Poll error: ${err.message}`);
     }
 
-    // Update the PR comment line with current status (and duration if complete).
-    // Re-fetch live body so concurrent runs updating other lines are preserved.
-    currentBody = updateLineStatus(await getCommentBody(owner, repo, COMMENT_ID), planId, status, duration);
-    await updateComment(owner, repo, COMMENT_ID, currentBody);
+    // Write status using retry+verify so concurrent runs don't overwrite each other
+    await writeLineStatus(owner, repo, COMMENT_ID, planId, status, duration);
 
     // Stop polling when run reaches a final state
     if (isTerminal(status)) {
