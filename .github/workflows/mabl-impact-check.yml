@@ -44,13 +44,12 @@ jobs:
     # Condition gates — workflow only runs when ALL of these are true:
     #   1. Comment is on a PR (not a plain issue) — pull_request field is not null
     #   2. Comment author is a human — blocks bot edit re-triggers (infinite loop)
-    #   3. Comment contains staging URL (created) OR our mabl marker (edited)
-    #      - 'staging.evertz.tools' — identifies a staging URL comment
-    #      - 'mabl-impact-check'   — identifies our mabl comment being edited
+    #   3. Either a new comment (created — script extracts any URL) or
+    #      an edit to our mabl comment (mabl-impact-check marker = checkbox click)
     if: |
       github.event.issue.pull_request != null &&
       github.event.sender.type != 'Bot' &&
-      (contains(github.event.comment.body, 'eio-ops.staging.evertz.tools') ||
+      (github.event.action == 'created' ||
       contains(github.event.comment.body, 'mabl-impact-check'))
 
     permissions:

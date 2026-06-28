@@ -169,35 +169,66 @@ async function githubRequest(endpoint, options = {}) {
   return body ? JSON.parse(body) : {};
 }
 
-// Searches all PR comments for an existing mabl impact comment.
+// Searches all PR comments for ALL existing mabl impact comments.
 // Identified by the hidden COMMENT_MARKER string (<!-- mabl-impact-check -->).
+// Returns all matches (there may be multiple from previous staging URL posts).
 //
 // API: GET /repos/{owner}/{repo}/issues/{pr_number}/comments?per_page=100
-// Returns the comment object if found, or null.
-async function findExistingComment(owner, repo) {
+async function findAllMablComments(owner, repo) {
   const comments = await githubRequest(
     `/repos/${owner}/${repo}/issues/${PR_NUMBER}/comments?per_page=100`
   );
-  return comments.find(c => c.body && c.body.includes(COMMENT_MARKER)) || null;
+  return comments.filter(c => c.body && c.body.includes(COMMENT_MARKER));
 }
 
-// Deletes the existing mabl comment (if any) and creates a fresh new one.
-// Always creates a new comment (not an edit) so it appears at the bottom of
-// the PR every time a new staging URL is posted.
+// Minimizes a comment via the GitHub GraphQL API so it collapses with a
+// "Show comment" button — same behaviour as outdated review suggestions.
+// Uses the OUTDATED classifier since the old mabl comment is superseded by
+// the new one posted for the latest staging URL.
+//
+// API: POST https://api.github.com/graphql  (minimizeComment mutation)
+// Requires comment.node_id (the GraphQL global node ID, not the REST integer id).
+async function minimizeComment(nodeId) {
+  const mutation = `
+    mutation($id: ID!) {
+      minimizeComment(input: { subjectId: $id, classifier: OUTDATED }) {
+        minimizedComment { isMinimized }
+      }
+    }
+  `;
+  const res = await fetch('https://api.github.com/graphql', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${GITHUB_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ query: mutation, variables: { id: nodeId } }),
+  });
+  const data = await res.json();
+  if (data.errors) throw new Error(`GraphQL minimizeComment error: ${JSON.stringify(data.errors)}`);
+  console.log(`Minimized comment node ${nodeId}`);
+}
+
+// Minimizes all existing mabl comments (if any) then posts a fresh new one.
+// Every new staging URL comment causes the previous mabl comment to collapse
+// with "Show comment" — the latest is always open at the bottom of the PR.
 //
 // APIs used:
-//   DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}  — remove old comment
-//   POST   /repos/{owner}/{repo}/issues/{pr_number}/comments   — create new comment
+//   GET     /repos/{owner}/{repo}/issues/{pr_number}/comments  — find old comments
+//   GraphQL minimizeComment mutation                           — collapse old comments
+//   POST    /repos/{owner}/{repo}/issues/{pr_number}/comments  — create new comment
 async function postOrReplaceComment(owner, repo, body) {
   // Append hidden marker so we can find this comment in future runs
   const fullBody = `${body}\n\n${COMMENT_MARKER}`;
-  const existing = await findExistingComment(owner, repo);
-  if (existing) {
-    await githubRequest(`/repos/${owner}/${repo}/issues/comments/${existing.id}`, {
-      method: 'DELETE',
-    });
-    console.log(`Deleted old comment #${existing.id}`);
+
+  // Minimize all previous mabl comments so they collapse (not deleted — still viewable)
+  const existing = await findAllMablComments(owner, repo);
+  for (const comment of existing) {
+    await minimizeComment(comment.node_id);
+    console.log(`Minimized old comment #${comment.id}`);
   }
+
+  // Post a fresh comment — appears open at the bottom of the PR
   await githubRequest(`/repos/${owner}/${repo}/issues/${PR_NUMBER}/comments`, {
     method: 'POST',
     body: JSON.stringify({ body: fullBody }),
@@ -405,10 +436,13 @@ async function handleNewStagingComment() {
   const [owner, repo] = REPO.split('/');
   const shortSha = COMMIT_SHA ? COMMIT_SHA.slice(0, 7) : 'unknown';
 
-  // Extract eio-ops staging URL specifically — ignores eio-admin and other staging URLs
-  // Pattern matches: <commit-sha>.eio-ops.staging.evertz.tools
-  const stagingUrl = COMMENT_BODY.match(/[\w-]+\.eio-ops\.staging\.evertz\.tools/)?.[0];
-  if (!stagingUrl) throw new Error('No staging URL found in comment');
+  // Extract the first URL from the comment — accepts any format (no domain restriction).
+  const urlMatch = COMMENT_BODY.match(/https?:\/\/[\w.-]+(?::\d+)?(?:\/[\S]*)?|[\w.-]+\.[\w]{2,}(?:\/[\S]*)?/);
+  if (!urlMatch) {
+    console.log('No URL found in comment — skipping');
+    return;
+  }
+  const stagingUrl = urlMatch[0].replace(/^https?:\/\//, '');
 
   console.log(`PR #${PR_NUMBER} | Commit: ${shortSha} | Staging: ${stagingUrl}`);
 
