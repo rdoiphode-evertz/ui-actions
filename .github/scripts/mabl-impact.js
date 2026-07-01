@@ -335,13 +335,22 @@ function statusLabel(status, duration) {
 //   <!-- staging:abc123.eio-ops.staging.evertz.tools --> at top — for checkbox trigger
 //   <!-- plan:mock-plan-001 --> on each line — to identify which plan was checked
 //   <!-- mabl-impact-check --> at bottom — to find this comment in future runs
-function buildComment(tests, stagingUrl, shortSha) {
+// lastStatuses is an optional map of { planId: statusText } extracted from the
+// previous mabl comment. When provided, each test line shows the last known
+// terminal status instead of ⚪ Not run — giving reviewers instant context on
+// what passed/failed on the previous staging URL without re-running everything.
+function buildComment(tests, stagingUrl, shortSha, lastStatuses = {}) {
   const direct   = tests.filter(t => t.impact === 'direct');
   const indirect = tests.filter(t => t.impact === 'indirect');
 
-  // Each checkbox line embeds the plan ID invisibly so we can detect which was clicked
-  const line = (t) =>
-    `- [ ] <!-- plan:${t.id} --> ${t.name} · ${statusLabel('not-run')}`;
+  // Each checkbox line embeds the plan ID invisibly so we can detect which was clicked.
+  // If a last-run status exists for this plan, show it (with a "previous" label)
+  // so reviewers know it hasn't been run on this staging URL yet.
+  const line = (t) => {
+    const last = lastStatuses[t.id];
+    const display = last ? `${last} _(previous)_` : statusLabel('not-run');
+    return `- [ ] <!-- plan:${t.id} --> ${t.name} · ${display}`;
+  };
 
   const section = (list) =>
     list.length === 0 ? '_None_\n' : list.map(line).join('\n') + '\n';
@@ -409,6 +418,33 @@ function updateLineStatus(body, planId, status, duration) {
     }
     return line;
   }).join('\n');
+}
+
+// Parses an existing mabl comment body and returns the last known terminal
+// status text per plan ID. Used to pre-populate the new comment when a fresh
+// staging URL is posted — reviewers see what passed/failed last time without
+// having to re-run everything.
+//
+// Only terminal statuses are preserved (✅ Passed, ❌ Failed, ⚫ Cancelled,
+// ⏭️ Skipped). Transient statuses (⏳ Running, 🔄 Scheduled) and ⚪ Not run
+// are discarded — those runs are no longer active on the new staging URL.
+//
+// Returns: { planId: statusText } e.g. { 'mock-plan-001': '❌ Failed' }
+function extractLastStatuses(body) {
+  if (!body) return {};
+  const statuses = {};
+  const TRANSIENT_PREFIXES = ['⏳', '🔄', '⚪'];
+  for (const line of body.split('\n')) {
+    const planMatch  = line.match(PLAN_ID_REGEX);
+    const statusMatch = line.match(/· (.+)$/);
+    if (!planMatch || !statusMatch) continue;
+    const statusText = statusMatch[1].trim();
+    const isTransient = TRANSIENT_PREFIXES.some(p => statusText.startsWith(p));
+    if (!isTransient) {
+      statuses[planMatch[1]] = statusText;
+    }
+  }
+  return statuses;
 }
 
 // ─── Polling helpers ──────────────────────────────────────────────────────────
@@ -485,8 +521,20 @@ async function handleNewStagingComment() {
 
   console.log(`Affected tests: ${affectedTests.map(t => t.name).join(', ')}`);
 
-  // Delete old mabl comment and post a fresh one with checkbox list
-  await postOrReplaceComment(owner, repo, buildComment(affectedTests, stagingUrl, shortSha));
+  // Extract last known statuses from the most recent mabl comment (if any).
+  // These are passed to buildComment so tests that already have a terminal result
+  // (Passed/Failed) from a previous staging URL are shown with that status rather
+  // than ⚪ Not run — saving reviewers from re-running tests they don't need to.
+  const previousComments = await findAllMablComments(owner, repo);
+  const lastBody = previousComments.length > 0
+    ? previousComments[previousComments.length - 1].body
+    : null;
+  const lastStatuses = extractLastStatuses(lastBody);
+  if (Object.keys(lastStatuses).length > 0) {
+    console.log('Carrying over last statuses:', JSON.stringify(lastStatuses));
+  }
+
+  await postOrReplaceComment(owner, repo, buildComment(affectedTests, stagingUrl, shortSha, lastStatuses));
   console.log('Comment posted. Reviewer can check a box to trigger a test.');
 }
 
