@@ -221,11 +221,17 @@ async function postOrReplaceComment(owner, repo, body) {
   // Append hidden marker so we can find this comment in future runs
   const fullBody = `${body}\n\n${COMMENT_MARKER}`;
 
-  // Minimize all previous mabl comments so they collapse (not deleted — still viewable)
+  // Minimize all previous mabl comments so they collapse (not deleted — still viewable).
+  // Best-effort: if minimize fails (permissions, rate limit, etc.) we log and continue
+  // so the new comment is always posted regardless.
   const existing = await findAllMablComments(owner, repo);
   for (const comment of existing) {
-    await minimizeComment(comment.node_id);
-    console.log(`Minimized old comment #${comment.id}`);
+    try {
+      await minimizeComment(comment.node_id);
+      console.log(`Minimized old comment #${comment.id}`);
+    } catch (err) {
+      console.warn(`Could not minimize comment #${comment.id}: ${err.message}`);
+    }
   }
 
   // Post a fresh comment — appears open at the bottom of the PR
@@ -438,7 +444,9 @@ function extractLastStatuses(body) {
     const planMatch  = line.match(PLAN_ID_REGEX);
     const statusMatch = line.match(/· (.+)$/);
     if (!planMatch || !statusMatch) continue;
-    const statusText = statusMatch[1].trim();
+    // Strip the _(previous)_ suffix added by buildComment so it doesn't compound
+    // on successive staging URL refreshes (e.g. "❌ Failed _(previous)_ _(previous)_")
+    const statusText = statusMatch[1].trim().replace(/ _\(previous\)_$/, '');
     const isTransient = TRANSIENT_PREFIXES.some(p => statusText.startsWith(p));
     if (!isTransient) {
       statuses[planMatch[1]] = statusText;
